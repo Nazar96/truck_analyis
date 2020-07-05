@@ -4,6 +4,7 @@ from sklearn.linear_model import Ridge
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 class TSTrendEstimator(ClusterMixin):
@@ -19,10 +20,20 @@ class TSTrendEstimator(ClusterMixin):
     aplha: Ridge alpha
     
     """
-    def __init__(self, rolling_window_size=6, n_lags=6, alpha=1):
+    def __init__(self, rolling_window_size=6, n_lags=6, alpha=1, max_coef=1.5, min_coef=-1.5):
         self.rolling_window_size =rolling_window_size
         self.n_lags = n_lags
         self.alpha = alpha
+        self.max_coef = max_coef
+        self.min_coef = min_coef
+    
+    def _get_status(self, estimation):
+        if estimation >= self.max_coef:
+            return 1
+        if estimation <= self.min_coef:
+            return -1
+        return 0
+        
     
     
     def fit_predict(self, X):
@@ -55,6 +66,25 @@ class TSTrendEstimator(ClusterMixin):
         coef = -1 * model.coef_.flatten()
         res = X.to_frame('X')
         res['estimation'] = np.nan
+        res['status'] = np.nan
         res.loc[mask, 'estimation'] = coef
+        res.loc[mask, 'status'] = list(map(self._get_status, coef))
         
         return res
+    
+    
+def plot_TSTrendEstimation(df, value='X', coef='estimation', status='status', max_coef=1.5, min_coef=-1.5):
+    
+    fig, axs = plt.subplots(2,1, sharex=True, figsize=(25,10))
+
+    df[value].plot(color='green', ax=axs[0])
+    axs[0].set_ylabel(value)
+
+    df[coef].plot(ax=axs[1])
+    axs[1].set_ylabel('coef')
+
+    axs[1].axhline(y=0, color='r', linestyle='-', alpha=0.5)
+    axs[1].axhline(y=min_coef, color='r', linestyle='--', alpha=0.25)
+    axs[1].axhline(y=max_coef, color='r', linestyle='--', alpha=0.25) 
+
+    plt.show()
