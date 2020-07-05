@@ -34,8 +34,6 @@ class TSTrendEstimator(ClusterMixin):
             return -1
         return 0
         
-    
-    
     def fit_predict(self, X):
         X = X.copy()
                 
