@@ -27,10 +27,10 @@ class TSTrendEstimator(ClusterMixin):
         self.max_coef = max_coef
         self.min_coef = min_coef
     
-    def _get_status(self, estimation):
-        if estimation >= self.max_coef:
+    def _get_status(self, score):
+        if score >= self.max_coef:
             return 1
-        if estimation <= self.min_coef:
+        if score <= self.min_coef:
             return -1
         return 0
         
@@ -65,21 +65,36 @@ class TSTrendEstimator(ClusterMixin):
 
         coef = -1 * model.coef_.flatten()
         res = X.to_frame('X')
-        res['estimation'] = np.nan
+        res['score'] = np.nan
         res['status'] = np.nan
-        res.loc[mask, 'estimation'] = coef
+        res.loc[mask, 'score'] = coef
         res.loc[mask, 'status'] = list(map(self._get_status, coef))
         
         return res
     
     
-def plot_TSTrendEstimation(df, value='X', coef='estimation', status='status', max_coef=1.5, min_coef=-1.5):
+def plot_TSTrendEstimation(df, value='X', coef='score', status='status', max_coef=1.5, min_coef=-1.5):
+
+    tmp = pd.DataFrame(index=df.index)
+    tmp['value'] = np.nan
     
     fig, axs = plt.subplots(2,1, sharex=True, figsize=(25,10))
 
-    df[value].plot(color='green', ax=axs[0])
+    tmp.loc[df['status']==1, 'value'] = df.loc[df['status']==1, value]
+    tmp['value'].plot(color='red', ax=axs[0], linewidth=5)
+    tmp['value'] = np.nan
+    
+    tmp.loc[df['status']==0, 'value'] = df.loc[df['status']==0, value]
+    tmp['value'].plot(color='green', ax=axs[0], linewidth=5)
+    tmp['value'] = np.nan
+    
+    tmp.loc[df['status']==-1, 'value'] = df.loc[df['status']==-1, value]
+    tmp['value'].plot(color='blue', ax=axs[0], linewidth=5)
+    tmp['value'] = np.nan
+    
     axs[0].set_ylabel(value)
 
+    
     df[coef].plot(ax=axs[1])
     axs[1].set_ylabel('coef')
 
