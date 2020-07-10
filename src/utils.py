@@ -71,24 +71,24 @@ class TSTrendEstimator(ClusterMixin):
         return res
     
     
-def plot_TSTrendEstimation(df, value='X', coef='score', status='status', max_coef=1.5, min_coef=-1.5):
+def plot_TSTrendEstimation(df, value='X', coef='score', status='status', max_coef=1, min_coef=-1, n_lags=6):
+   
+    fig, axs = plt.subplots(2,1, sharex=True, figsize=(25,10))    
 
-    tmp = pd.DataFrame(index=df.index)
-    tmp['value'] = np.nan
-    
-    fig, axs = plt.subplots(2,1, sharex=True, figsize=(25,10))
+    for status, color in zip([0, -1, 1], ['green', 'blue', 'red']):
 
-    tmp.loc[df['status']==1, 'value'] = df.loc[df['status']==1, value]
-    tmp['value'].plot(color='red', ax=axs[0], linewidth=5)
-    tmp['value'] = np.nan
-    
-    tmp.loc[df['status']==0, 'value'] = df.loc[df['status']==0, value]
-    tmp['value'].plot(color='green', ax=axs[0], linewidth=5)
-    tmp['value'] = np.nan
-    
-    tmp.loc[df['status']==-1, 'value'] = df.loc[df['status']==-1, value]
-    tmp['value'].plot(color='blue', ax=axs[0], linewidth=5)
-    tmp['value'] = np.nan
+        mask = (df['status'] == status)
+        
+        ids = np.where(mask)[0]
+        for i in range(n_lags):
+            ids = np.unique(np.concatenate((ids, ids-i)))    
+        max_id = mask.shape[0] - 1
+        ids[ids < 0] = 0
+        ids[ids > max_id] = max_id
+        
+        tmp = pd.Series(index=df.index)
+        tmp.iloc[ids] = df.iloc[ids][value]
+        tmp.plot(color=color, ax=axs[0], linewidth=5)
     
     axs[0].set_ylabel(value)
 
