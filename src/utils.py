@@ -2,9 +2,34 @@ from sklearn.base import ClusterMixin
 from sklearn.linear_model import Ridge
 
 import pandas as pd
+import geopandas as gpd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+
+
+import numpy as np
+from matplotlib import pyplot as plt
+from plotly import express as px
+from datetime import datetime
+import seaborn as sns
+
+import shapely
+from shapely.geometry import Point
+import zipfile
+from tqdm import tqdm_notebook as tqdm
+from copy import deepcopy, copy
+from datetime import timedelta
+from collections import OrderedDict
+import gc
+import re
+
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+
+from warnings import simplefilter
+simplefilter('ignore')
 
 
 class TSTrendEstimator(ClusterMixin):
@@ -101,3 +126,259 @@ def plot_TSTrendEstimation(df, value='X', coef='score', status='status', max_coe
     axs[1].axhline(y=max_coef, color='r', linestyle='--', alpha=0.25) 
 
     plt.show()
+
+
+######################################################################
+
+
+filter_zones = [
+    {
+        'lon': 52.46469498,
+        'lat': 55.71164005,
+        'radius': 50_000,
+        'name': 'nab_cheln',
+    },
+]
+
+
+def value2tuple(value):
+    if isinstance(value, (tuple, list)):
+        return value
+    return (value,)
+
+
+def init_filter_zones(filter_zones, epsg):
+    result = {}
+    for zone in filter_zones:
+        result.update({
+            zone['name']: gpd.GeoSeries([Point(zone['lon'], zone['lat'])],
+                                        crs={'init': f'epsg:{epsg}'}).to_crs(epsg=3576). \
+                buffer(zone['radius']).iloc[0]
+        })
+    return result
+
+
+def dfPolar2gdfCartesian(df, epsg_init=4326):
+    df = gpd.GeoDataFrame(df,
+                          geometry=gpd.points_from_xy(df['lon'], df['lat']),
+                          crs={'init': f'epsg:{epsg_init}'})
+    df.to_crs(epsg=3576, inplace=True)
+    return df
+
+
+def prep_df(df):
+    df['time'] = pd.to_datetime(df['time'])
+    df.set_index('time', drop=False, inplace=True)
+    df.sort_index(inplace=True)
+    df['Trip Distance padded'] = df['Trip Distance (km)'].fillna(method='pad').fillna(0)
+    return df
+
+
+class TripLabel():
+    def __init__(self, path=None, df_dict=None, split_criterios=('time', 'distance'),
+                 split_params={'hours': 12}, **params):
+        """
+        path: path to zipfile
+        df_dict: dictionary of dataframes
+        """
+
+        self.trip_diff_method = \
+            {
+                'time': self.trip_diff_by_time_delta,
+                'distance': self.trip_diff_by_trip_distance,
+            }
+
+        self.split_criterios = split_criterios
+        self.split_params = split_params
+        self._params = params
+
+        if df_dict is None:
+            setattr(zipfile.ZipFile, 'keys', lambda x: x.namelist())
+            self._df_dict = zipfile.ZipFile(path)
+        else:
+            self._df_dict = df_dict
+
+        self._filenames = self.keys()
+
+    def set_filenames(self, filenames='all'):
+        """Set files to label trips"""
+
+        self._filenames = filenames
+        if self._filenames == 'all':
+            self._filenames = self.keys()
+        elif isinstance(filenames, str):
+            self._filenames = [self._filenames]
+        return self
+
+    def get_filenames(self):
+        return self._filenames
+
+    def __iter__(self):
+        return self.gen_labeled_trips()
+
+    def __len__(self):
+        return len(self.get_filenames())
+
+    def keys(self):
+        """Get all file names in zip"""
+        return list(self._df_dict.keys())
+
+    def gen_labeled_trips(self):
+        """Generated dataframes with labeled trips"""
+
+        trip_id = [0]
+        for df in self._gen_data():
+            trip_id = self.label(df, self.split_criterios) + trip_id[-1]
+            df['trip_id'] = trip_id
+            yield df
+
+    def _gen_data(self):
+        """Generate original dataframe from zipfile"""
+        for filename in self._filenames:
+            yield self.read_file(filename)
+
+    def read_file(self, filename):
+        """Read and prepare raw data from zipfile"""
+
+        if isinstance(self._df_dict, dict):
+            df = self._df_dict[filename]
+        else:
+            df = pd.read_csv(self._df_dict.open(filename), **self._params)
+        df = prep_df(df)
+        return df
+
+    def label(self, df, criterios):
+        """Return list of trip labels for dataframe"""
+        trip_diff_mask = [self.trip_diff_method[criterio](df, self.split_params) for criterio in criterios]
+        trip_diff_mask = (np.sum(trip_diff_mask, axis=0) > 0).tolist()
+        trip_id = self._label_trip(trip_diff_mask)
+        return trip_id
+
+    @staticmethod
+    def trip_diff_by_trip_distance(df, params):
+        """Return list of trip dist diffs for dataframe"""
+        trip_diff_mask = np.asarray(df['Trip Distance padded'].diff().fillna(-1) < 0)
+        return trip_diff_mask
+
+    @staticmethod
+    def trip_diff_by_time_delta(df, params):
+        """Return list of trip time diffs for dataframe"""
+        delta_t = timedelta(**params)
+        trip_diff_mask = np.asarray(df['time'].diff().fillna(delta_t) >= delta_t)
+        return trip_diff_mask
+
+    @staticmethod
+    def _label_trip(trip_diff_mask):
+        """Convert binary mask of trip diffs to trip_id"""
+
+        trip_id = deepcopy(trip_diff_mask)
+        flag = True
+        trip_counter = 0
+
+        for i in range(1, len(trip_id)):
+            if (trip_id[i] == False):
+                flag = False
+
+            if (trip_id[i] == True) and (flag == True):
+                trip_id[i] = False
+
+            if (trip_id[i] == True):
+                flag = True
+
+        for i in range(len(trip_id)):
+            if trip_id[i] == True:
+                trip_counter += 1
+            trip_id[i] = trip_counter
+
+        return np.asarray(trip_id)
+
+
+class TripFilter():
+    def __init__(self, df, filter_zones=filter_zones, epsg_init=4326):
+        self.epsg_init = epsg_init
+        self._filter_zones = init_filter_zones(filter_zones, self.epsg_init)
+
+        self._df = df
+        self._invalid_trip_set = set()
+        self._filters = \
+            OrderedDict({
+                'distance': self.filter_by_total_distance,
+                'jumping': self.filter_by_jumping,
+                'zone': self.filter_by_zone
+            })
+
+    def filter_by(self, criterios, verbose=True):
+        criterios = value2tuple(criterios)
+        for criterio in self._filters.keys():
+            if criterio in criterios:
+                self._filters[criterio]().remove_invalid_trips()
+        return self
+
+    def get_dataframe(self):
+        return self._df
+
+    @property
+    def dataframe(self):
+        return self.get_dataframe()
+
+    def get_invalid_trip_set(self):
+        return copy(self._invalid_trip_set)
+
+    def update_invalid_trips_set(self, invalid_list):
+        self._invalid_trip_set = self._invalid_trip_set.union(invalid_list)
+        return self
+
+    def label_by_filter_zones(self, gdf):
+        for zone_name in self._filter_zones.keys():
+            lambda_filter = lambda p: self._filter_zones[zone_name].contains(p)
+            gdf[zone_name] = gdf['geometry'].apply(lambda_filter)
+        return gdf
+
+    def conv2gpd(self, df, freq, columns=[]):
+        gdf = []
+        for trip_id in df.trip_id.unique():
+            tmp = df.query('trip_id == @trip_id')[set(['lat', 'lon'] + columns)]
+            tmp = tmp.resample(freq).mean().dropna()
+            tmp['trip_id'] = trip_id
+            gdf.append(tmp)
+        gdf = dfPolar2gdfCartesian(pd.concat(gdf))
+        return gdf
+
+    def out_of_filter_zones_counter(self, freq='5T'):
+        zone_names = list(self._filter_zones.keys())
+        gdf = self.conv2gpd(self._df, freq=freq)
+        gdf = self.label_by_filter_zones(gdf)
+
+        out_of_filter_zone_df = ~gdf[zone_names]
+        out_zone_counter_df = out_of_filter_zone_df.groupby(gdf['trip_id'])[zone_names]
+        out_zone_counter_df = out_zone_counter_df.sum().astype(int)
+        return out_zone_counter_df
+
+    def filter_by_zone(self, thresh=0, freq='5T'):
+        out_zone_counter_df = self.out_of_filter_zones_counter(freq=freq)
+        out_zone_counter_df = out_zone_counter_df.min(axis=1).astype(int)
+        out_zone_trips_list = out_zone_counter_df[out_zone_counter_df <= thresh].index.tolist()
+        self.update_invalid_trips_set(out_zone_trips_list)
+        return self
+
+    def filter_by_total_distance(self, thresh=500):
+        total_trip_dist_df = self._df.groupby('trip_id')['Trip Distance (km)'].agg(['min', 'max'])
+        total_trip_dist_df = (total_trip_dist_df['max'] - total_trip_dist_df['min']).fillna(0)
+        short_dist_trips_list = total_trip_dist_df[total_trip_dist_df <= thresh].index.tolist()
+        self.update_invalid_trips_set(short_dist_trips_list)
+        return self
+
+    def filter_by_jumping(self, thresh=10, count_thresh=1):
+        jumping_trip_list = []
+        for trip_id in self._df['trip_id'].unique():
+            df = self._df.query('trip_id == @trip_id')
+            value = (df['Trip Distance padded'].diff() >= thresh).values.sum()
+            if value >= count_thresh:
+                jumping_trip_list.append(trip_id)
+        self.update_invalid_trips_set(jumping_trip_list)
+        return self
+
+    def remove_invalid_trips(self):
+        self._df = self._df[~self._df['trip_id'].isin(self._invalid_trip_set)]
+        self._invalid_trip_set = set()
+        return self
