@@ -524,10 +524,58 @@ def get_spline(ts, n_knots):
     y = ts.values
     nan_mask = ~np.isnan(y)
 
-    spline = get_natural_cubic_spline_model(x[nan_mask], y[nan_mask], minval=min(x), maxval=max(x), n_knots=n_knots, knots=None).predict(x)
+    if sum(nan_mask) == 0:
+        spline = np.full_like(x, np.nan)
+    else:
+        spline = get_natural_cubic_spline_model(x[nan_mask], y[nan_mask], minval=min(x), maxval=max(x), n_knots=n_knots, knots=None).predict(x)
+        
     spline = pd.Series(spline, index=ts.index)
     
     return spline
+
+
+def spline_defect_score(ts, n_knots=10, agg_func=None, resample_freq='1T'):
+    if agg_func is None:
+        agg_func = ['max', 'std']
+        
+    spline = get_spline(ts, n_knots)
+        
+    defect = (ts - spline).abs()
+    score = defect.resample(resample_freq).agg(agg_func)
+    
+    return score
+
+
+def spline_defect_trip_score(ts, timedelta='1 hour', n_knots=10, thresh=15):
+    
+    from tqdm.notebook import tqdm_notebook as tqdm
+    
+    ts = ts.copy()
+    start_time = ts.index.min()
+    finish_time = ts.index.max()
+
+    time_step = pd.Timedelta(timedelta)
+    n_steps = int(np.ceil((finish_time - start_time)/time_step))
+    
+    
+    score = []
+    left_time = start_time
+    for i in tqdm(range(1, 1+n_steps)):
+        right_time = min(left_time+time_step, finish_time)
+        tmp = ts.loc[left_time : right_time].copy()
+        score.append(spline_defect_score(tmp, n_knots, ['max']))
+        left_time = right_time
+    score = pd.concat(score)
+    
+    
+    tmp = score['max'] >= thresh
+    score = pd.merge_asof(ts, tmp, left_index=True, right_index=True)
+    
+    score['score'] = np.nan
+    score.loc[score['max']==1, 'score'] = score.loc[score['max']==1, 'speed']
+    score.drop('max', axis=1, inplace=True)
+    
+    return score
     
     
     
