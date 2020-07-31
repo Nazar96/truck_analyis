@@ -517,6 +517,18 @@ class NaturalCubicSpline(AbstractSpline):
         for i in range(0, self.n_knots - 2):
             X_spl[:, i+1] = (d(i, X) - d(self.n_knots - 2, X)).squeeze()
         return X_spl
+
+    
+def get_spline(ts, n_knots):
+    x = np.arange(len(ts.values))
+    y = ts.values
+    nan_mask = ~np.isnan(y)
+
+    spline = get_natural_cubic_spline_model(x[nan_mask], y[nan_mask], minval=min(x), maxval=max(x), n_knots=n_knots, knots=None).predict(x)
+    spline = pd.Series(spline, index=ts.index)
+    
+    return spline
+    
     
     
 class TSSplineEstimator(ClusterMixin):
@@ -527,14 +539,9 @@ class TSSplineEstimator(ClusterMixin):
         pass
     
     def predict(self, X, k=0.1):
-        series = X.copy()
         minutes = int((X.index.max() - X.index.min()).seconds/60)
         
-        y = series.fillna(0).values
-        x = np.arange(len(y))
-        
-        spline = get_natural_cubic_spline_model(x, y, minval=0, maxval=max(x), n_knots=int(minutes*k)).predict(x)
-        spline = pd.Series(spline, index=series.index)
+        spline = get_spline(X, n_knots=int(minutes*k))
         score = spline.diff()
         
         return score
