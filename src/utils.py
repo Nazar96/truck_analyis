@@ -546,10 +546,22 @@ def spline_defect_score(ts, n_knots=10, agg_func=None, resample_freq='1T'):
     return score
 
 
-def spline_defect_trip_score(ts, timedelta='1 hour', n_knots=10, thresh=15):
+def spline_segmentation(ts, n_knots=10, upper_bound=0.2, lower_bound=-0.2):
+        
+    spline = get_spline(ts, n_knots)
+    diff = spline.diff()
+    score = diff.copy()
+            
+    return score
+
+
+def spline_defect_trip_score(ts, timedelta='1 hour', n_knots=10, thresh=15, method='diff'):
+    """
+    Score on one series
     
-    from tqdm.notebook import tqdm_notebook as tqdm
-    
+    mathods: segmentation or score
+    """
+        
     ts = ts.copy()
     start_time = ts.index.min()
     finish_time = ts.index.max()
@@ -560,22 +572,42 @@ def spline_defect_trip_score(ts, timedelta='1 hour', n_knots=10, thresh=15):
     
     score = []
     left_time = start_time
-    for i in tqdm(range(1, 1+n_steps)):
+    for i in range(1, 1+n_steps):
         right_time = min(left_time+time_step, finish_time)
         tmp = ts.loc[left_time : right_time].copy()
-        score.append(spline_defect_score(tmp, n_knots, ['max']))
+        
+        if method == 'score':
+            tmp = spline_defect_score(tmp, n_knots, ['max'])
+        elif method == 'diff':
+            tmp = spline_segmentation(tmp, n_knots).to_frame('score')
+            
+        score.append(tmp)
         left_time = right_time
     score = pd.concat(score)
     
     
-    tmp = score['max'] >= thresh
-    score = pd.merge_asof(ts, tmp, left_index=True, right_index=True)
+#     tmp = score['max'] >= thresh
+    score = pd.merge_asof(ts, score['score'], left_index=True, right_index=True)
     
-    score['score'] = np.nan
-    score.loc[score['max']==1, 'score'] = score.loc[score['max']==1, 'speed']
-    score.drop('max', axis=1, inplace=True)
+    score.loc[score['speed'].isna(), 'score'] = np.nan
+#     score.loc[score['max']==1, 'score'] = score.loc[score['max']==1, 'speed']
+#     score.drop('max', axis=1, inplace=True)
     
     return score
+
+
+def spline_score_multiple_cars(X, n_knots=8, timedelta='1 hour'):
+    res = []
+    for car_vin, series in tqdm(X.groupby('car_vin')):
+        series.index = series.index.droplevel('car_vin')
+        score = spline_defect_trip_score(series, n_knots=8, method='diff', timedelta='1 hour')
+        score['car_vin'] = car_vin
+        res.append(score)
+
+    res = pd.concat(res)
+    res.set_index('car_vin', append=True, inplace=True)
+    res = res.reorder_levels(['car_vin', 'time']).sort_index()
+    return res
     
     
     
@@ -586,16 +618,25 @@ class TSSplineEstimator(ClusterMixin):
     def fit(self, X, y=None):
         pass
     
-    def predict(self, X, k=0.1):
-        minutes = int((X.index.max() - X.index.min()).seconds/60)
-        
-        spline = get_spline(X, n_knots=int(minutes*k))
+    def _predict_series(self, ts, k):
+        minutes = int((ts.index.max() - ts.index.min()).seconds/60)
+        spline = get_spline(ts, n_knots=int(minutes*k))
         score = spline.diff()
-        
         return score
     
+    def predict(self, X, k=0.1):
+        pass
+            
+    
+def score2cat(score, upper_bound=0.4, lower_bound=-0.15):
+    s = score.copy()
+    s.loc[score < lower_bound] = -1
+    s.loc[score > upper_bound] = 1
+    s.loc[(score <= upper_bound) & (score >= lower_bound)] = 0
+    return s
+    
 
-def plot_trend(ts, score, upper_bound=0.5, lower_bound=-0.5):
+def plot_trend(ts, score, upper_bound=0.5, lower_bound=-0.15):
     plt.figure(figsize=(25,5))
 
     s = ts.copy()
